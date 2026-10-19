@@ -2,8 +2,7 @@ import os, re, json, html
 import xml.etree.ElementTree as ET
 import asyncio, aiohttp
 
-TOKEN = os.environ["DISCORD_TOKEN"]
-DISCORD_CHANNEL_ID = "1561737078855831582"
+WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 YT_HANDLE = "therobloxexecutorscripter"
 STATE_FILE = "state.json"
 
@@ -30,12 +29,11 @@ def find_all(obj, key):
 
 
 async def send(session, content, embed):
-    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
-    async with session.post(url, json={"content": content, "embeds": [embed]},
-                            headers={"Authorization": f"Bot {TOKEN}"}) as r:
+    async with session.post(WEBHOOK, json={"content": content, "embeds": [embed]}) as r:
         if r.status >= 300:
             print("Discord error", r.status, await r.text())
             return False
+        print("Posted to Discord:", embed.get("title"))
         return True
 
 
@@ -59,8 +57,6 @@ async def main():
         if icon:
             author["icon_url"] = icon
 
-        items = []  # oldest first at the end
-
         # videos
         videos = []
         if yt_id:
@@ -74,15 +70,19 @@ async def main():
                         if len(desc) > 1000:
                             desc = desc[:1000] + "..."
                         url = f"https://www.youtube.com/watch?v={vid}"
-                        videos.append((vid, f"🚨 **NEW VIDEO** 🚨\n{url}", {
-                            "title": e.find("atom:title", NS).text, "url": url,
-                            "description": desc or "No description.", "color": 0xFF0000,
-                            "author": author, "image": {"url": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg"},
-                            "timestamp": e.find("atom:published", NS).text,
-                            **({"thumbnail": {"url": icon}} if icon else {}),
-                            "footer": {"text": "YouTube"}}))
+                        emb = {"title": e.find("atom:title", NS).text, "url": url,
+                               "description": desc or "No description.", "color": 0xFF0000,
+                               "author": author,
+                               "image": {"url": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg"},
+                               "timestamp": e.find("atom:published", NS).text,
+                               "footer": {"text": "YouTube"}}
+                        if icon:
+                            emb["thumbnail"] = {"url": icon}
+                        videos.append((vid, f"🚨 **NEW VIDEO** 🚨\n{url}", emb))
                 else:
                     print("feed status", r.status)
+        else:
+            print("Could not find YouTube channel id")
 
         # community posts / polls (best effort)
         posts = []
@@ -127,7 +127,9 @@ async def main():
                 state["seeded"] = True
                 print("First run: remembered", len(allitems), "existing items.")
         else:
-            for iid, content, emb in reversed([i for i in allitems if i[0] not in seen]):
+            new = [i for i in allitems if i[0] not in seen]
+            print("New items found:", len(new))
+            for iid, content, emb in reversed(new):
                 if await send(s, content, emb):
                     seen.add(iid)
 
