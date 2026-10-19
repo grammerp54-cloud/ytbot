@@ -22,7 +22,7 @@ jobs:
       - run: pip install aiohttp
       - run: python bot.py
         env:
-          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
       - name: Save state
         run: |
           git config user.name "bot"
