@@ -1,8 +1,10 @@
-import os, re, json, html
+import os, re, json, html, asyncio
 import xml.etree.ElementTree as ET
-import asyncio, aiohttp
+import aiohttp
 
-WEBHOOK = os.environ["DISCORD_WEBHOOK"]
+WEBHOOK = (os.environ.get("DISCORD_WEBHOOK") or "").strip()
+TEST = os.environ.get("TEST_MODE", "").lower() == "true"
+FORCE = os.environ.get("FORCE_MODE", "").lower() == "true"
 YT_HANDLE = "therobloxexecutorscripter"
 STATE_FILE = "state.json"
 
@@ -28,23 +30,42 @@ def find_all(obj, key):
             yield from find_all(i, key)
 
 
-async def send(session, content, embed):
-    async with session.post(WEBHOOK, json={"content": content, "embeds": [embed]}) as r:
+async def send(session, content, embed=None):
+    payload = {"content": content}
+    if embed:
+        payload["embeds"] = [embed]
+    async with session.post(WEBHOOK + "?wait=true", json=payload) as r:
+        body = await r.text()
         if r.status >= 300:
-            print("Discord error", r.status, await r.text())
+            print(f"DISCORD ERROR {r.status}: {body[:300]}")
             return False
-        print("Posted to Discord:", embed.get("title"))
+        print(f"DISCORD OK {r.status}: posted -> {(embed or {}).get('title', content[:40])}")
         return True
 
 
 async def main():
+    # ---- check the webhook secret ----
+    if not WEBHOOK:
+        raise SystemExit("ERROR: secret DISCORD_WEBHOOK is empty or missing.")
+    if not re.match(r"^https://(canary\.|ptb\.)?discord(app)?\.com/api/webhooks/\d+/[\w-]+$", WEBHOOK):
+        raise SystemExit("ERROR: DISCORD_WEBHOOK is not a valid webhook URL. "
+                         "Copy it again in Discord (Edit Channel > Integrations > Webhooks).")
+    print("Webhook secret looks valid.")
+
     state = {"ids": [], "seeded": False}
     if os.path.exists(STATE_FILE):
-        state = json.load(open(STATE_FILE))
-    seen = set(state["ids"])
+        try:
+            state = json.load(open(STATE_FILE))
+        except Exception:
+            print("state.json unreadable, starting fresh")
+    seen = set(state.get("ids", []))
 
     async with aiohttp.ClientSession(headers=HEADERS) as s:
-        # channel info
+        if TEST:
+            ok = await send(s, "✅ **Webhook test**: the bot can post to this channel.")
+            print("Test message sent." if ok else "Test message FAILED.")
+
+        # ---- channel info ----
         async with s.get(HANDLE_URL) as r:
             page = await r.text()
         m = re.search(r'"channelId":"(UC[\w-]{22})"', page) or re.search(r'channel/(UC[\w-]{22})', page)
@@ -56,8 +77,9 @@ async def main():
         author = {"name": name, "url": HANDLE_URL}
         if icon:
             author["icon_url"] = icon
+        print("YouTube channel id:", yt_id)
 
-        # videos
+        # ---- videos ----
         videos = []
         if yt_id:
             async with s.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={yt_id}") as r:
@@ -80,11 +102,10 @@ async def main():
                             emb["thumbnail"] = {"url": icon}
                         videos.append((vid, f"🚨 **NEW VIDEO** 🚨\n{url}", emb))
                 else:
-                    print("feed status", r.status)
-        else:
-            print("Could not find YouTube channel id")
+                    print("YouTube feed status:", r.status)
+        print("Videos in feed:", len(videos))
 
-        # community posts / polls (best effort)
+        # ---- community posts / polls (best effort) ----
         posts = []
         try:
             async with s.get(HANDLE_URL + "/posts") as r:
@@ -119,19 +140,28 @@ async def main():
                         continue
         except Exception as e:
             print("posts error:", e)
+        print("Community posts found:", len(posts))
 
         allitems = videos + posts
-        if not state["seeded"]:
-            if allitems:
-                seen.update(i[0] for i in allitems)
-                state["seeded"] = True
-                print("First run: remembered", len(allitems), "existing items.")
+
+        # ---- decide what to post ----
+        if FORCE and videos:
+            print("FORCE mode: posting the newest video.")
+            await send(s, videos[0][1], videos[0][2])
+        elif not state.get("seeded"):
+            seen.update(i[0] for i in allitems)
+            state["seeded"] = True
+            print("First run: remembered", len(allitems), "existing items. Nothing posted.")
         else:
             new = [i for i in allitems if i[0] not in seen]
             print("New items found:", len(new))
             for iid, content, emb in reversed(new):
                 if await send(s, content, emb):
                     seen.add(iid)
+
+        # remember everything currently visible
+        if state.get("seeded"):
+            seen.update(i[0] for i in allitems if i[0] in seen)
 
     state["ids"] = sorted(seen)
     json.dump(state, open(STATE_FILE, "w"))
